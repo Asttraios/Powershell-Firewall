@@ -1,0 +1,7 @@
+﻿Type,Target,Protocol,Direction,ProfileGroup
+Port,445,TCP,Inbound,Public
+Port,3389,TCP,Inbound,Public
+Port,8080,TCP,Inbound,Public
+Port,23,TCP,Inbound,Private
+IP,198.51.100.50,Any,Inbound,Private
+Port,4444,TCP,Outbound,Domain

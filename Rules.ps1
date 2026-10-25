@@ -1,3 +1,20 @@
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Modul zarzadzania regulami zapory Windows (Podpunkty A oraz B).
+.DESCRIPTION
+    Skrypt odpowiada za dodawanie i usuwanie regul blokujacych porty oraz adresy IP,
+    importowanie zestawow regul z pliku CSV oraz kontekstowe przelaczanie grup regul
+    w zaleznosci od aktywnego profilu sieciowego (Public, Private, Domain).
+    
+    Wykorzystane cmdlety z modulu NetSecurity / NetConnection:
+    - New-NetFirewallRule
+    - Get-NetFirewallRule
+    - Set-NetFirewallRule
+    - Remove-NetFirewallRule
+    - Get-NetConnectionProfile
+#>
+
 function Add-BlockedPort {
     param (
         [Parameter(Mandatory = $true)]
@@ -117,7 +134,78 @@ function Update-FirewallRulesByProfile {
     }
 }
 
-#Wszystkie reguly na raz: Get-NetFirewallRule -Name "PF_*"
-#reguly sieci private: Get-NetFirewallRule -Group "PowershellFirewall_Private"
-#reguly sieci public: Get-NetFirewallRule -Group "PowershellFirewall_Public"
-#reguly sieci domain: Get-NetFirewallRule -Group "PowershellFirewall_Domain"
+function Import-RulesFromCsv {
+    <#
+    .SYNOPSIS
+        Wczytuje i tworzy reguly zapory masowo z pliku CSV, a nastepnie aktywuje odpowiedni profil.
+    #>
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$CsvPath
+    )
+
+    if (-not (Test-Path $CsvPath)) {
+        Write-Warning "CSV file not found at path: $CsvPath"
+        return
+    }
+
+    $rulesList = Import-Csv -Path $CsvPath
+
+    foreach ($item in $rulesList) {
+        if ($item.Type -eq "Port") {
+            Add-BlockedPort -Port ([int]$item.Target) `
+                            -Protocol $item.Protocol `
+                            -Direction $item.Direction `
+                            -ProfileGroup $item.ProfileGroup
+        }
+        elseif ($item.Type -eq "IP") {
+            Add-BlockedIP -IPAddress $item.Target `
+                          -Direction $item.Direction `
+                          -ProfileGroup $item.ProfileGroup
+        }
+    }
+
+    # Automatyczne przelaczenie stanu regul po zaimportowaniu
+    Update-FirewallRulesByProfile
+}
+
+function Remove-PFRules {
+    <#
+    .SYNOPSIS
+        Usuwa pojedyncza regule po nazwie lub czysci wszystkie reguly stworzone przez projekt.
+    #>
+    param (
+        [string]$RuleName,
+        [switch]$All
+    )
+
+    if ($All) {
+        $rules = Get-NetFirewallRule -Name "PF_*" -ErrorAction SilentlyContinue
+        if ($null -ne $rules) {
+            Remove-NetFirewallRule -Name "PF_*"
+            Write-Host "[CLEANUP] All 'PF_*' firewall rules have been removed." -ForegroundColor Yellow
+        }
+        else {
+            Write-Warning "No 'PF_*' rules found to remove."
+        }
+    }
+    elseif ($RuleName) {
+        $rule = Get-NetFirewallRule -Name $RuleName -ErrorAction SilentlyContinue
+        if ($null -ne $rule) {
+            Remove-NetFirewallRule -Name $RuleName
+            Write-Host "[REMOVED] Firewall rule '$RuleName' has been removed." -ForegroundColor Yellow
+        }
+        else {
+            Write-Warning "Firewall rule '$RuleName' does not exist!"
+        }
+    }
+}
+
+# Przydatne komendy
+# =========================================================================
+# Wszystkie reguly projektu na raz: Get-NetFirewallRule -Name "PF_*"
+# Reguly sieci Private:             Get-NetFirewallRule -Group "PowershellFirewall_Private"
+# Reguly sieci Public:              Get-NetFirewallRule -Group "PowershellFirewall_Public"
+# Reguly sieci Domain:              Get-NetFirewallRule -Group "PowershellFirewall_Domain"
+# Import z pliku CSV:               Import-RulesFromCsv -CsvPath ".\rules_config.csv"
+# Usuniecie wszystkich naszych regul: Remove-PFRules -All
