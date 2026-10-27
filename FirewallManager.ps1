@@ -1,6 +1,6 @@
 #Requires -RunAsAdministrator
 param (
-    # Przelacznik uzywany przez Harmonogram Zadan Windows do aktualizacji w tle (omija menu)
+    # Przelacznik uzywany przez Harmonogram Zadan Windows do aktualizacji w tle
     [switch]$AutoUpdateProfile
 )
 
@@ -178,7 +178,7 @@ function Register-FirewallProfileTask {
 "@
         $trigger.Enabled = $true
 
-        # Uruchomienie skryptu z flaga -AutoUpdateProfile (omija petle menu!)
+        # Uruchomienie skryptu z flaga -AutoUpdateProfile
         $actionArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`" -AutoUpdateProfile"
         $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArgs
 
