@@ -1,4 +1,8 @@
 #Requires -RunAsAdministrator
+param (
+    # Przelacznik uzywany przez Harmonogram Zadan Windows do aktualizacji w tle (omija menu)
+    [switch]$AutoUpdateProfile
+)
 
 # ==========================================
 # KONFIGURACJA LOGOWANIA I BASELINE
@@ -59,12 +63,19 @@ function Add-BlockedPort {
         Protocol    = $Protocol
         LocalPort   = $Port
         Profile     = "Any"
-        Enabled     = $false
+        Enabled     = "False"
+        ErrorAction = "Stop"
     }
-    New-NetFirewallRule @ruleParams | Out-Null
 
-    Write-Host "[SUCCESS] Port $Port added to '$groupName' ($Protocol, direction: $Direction)." -ForegroundColor Green
-    Write-FirewallLog -Message "Added blocked port rule: $ruleName (Port $Port, $Protocol)" -Level "INFO"
+    try {
+        New-NetFirewallRule @ruleParams | Out-Null
+        Write-Host "[SUCCESS] Port $Port added to '$groupName' ($Protocol, direction: $Direction)." -ForegroundColor Green
+        Write-FirewallLog -Message "Added blocked port rule: $ruleName (Port $Port, $Protocol)" -Level "INFO"
+    }
+    catch {
+        Write-Host "[ERROR] Failed to add port $Port to '$groupName': $($_.Exception.Message)" -ForegroundColor Red
+        Write-FirewallLog -Message "Failed to add blocked port rule $ruleName : $($_.Exception.Message)" -Level "ERROR"
+    }
 }
 
 function Add-BlockedIP {
@@ -98,12 +109,19 @@ function Add-BlockedIP {
         Action        = "Block"
         RemoteAddress = $IPAddress
         Profile       = "Any"
-        Enabled       = $false
+        Enabled       = "False"
+        ErrorAction   = "Stop"
     }
-    New-NetFirewallRule @ruleParams | Out-Null
 
-    Write-Host "[SUCCESS] IP address $IPAddress added to '$groupName' (direction: $Direction)." -ForegroundColor Green
-    Write-FirewallLog -Message "Added blocked IP rule: $ruleName (IP $IPAddress)" -Level "INFO"
+    try {
+        New-NetFirewallRule @ruleParams | Out-Null
+        Write-Host "[SUCCESS] IP address $IPAddress added to '$groupName' (direction: $Direction)." -ForegroundColor Green
+        Write-FirewallLog -Message "Added blocked IP rule: $ruleName (IP $IPAddress)" -Level "INFO"
+    }
+    catch {
+        Write-Host "[ERROR] Failed to add IP $IPAddress to '$groupName': $($_.Exception.Message)" -ForegroundColor Red
+        Write-FirewallLog -Message "Failed to add blocked IP rule $ruleName : $($_.Exception.Message)" -Level "ERROR"
+    }
 }
 
 function Update-FirewallRulesByProfile {
@@ -132,16 +150,60 @@ function Update-FirewallRulesByProfile {
 
         if ($null -ne $rulesInGroup) {
             if ($profileName -eq $activeProfile) {
-                Set-NetFirewallRule -Group $groupName -Enabled True
+                Set-NetFirewallRule -Group $groupName -Enabled "True"
                 Write-Host "[ACTIVE] Rule set '$groupName' is now ENABLED." -ForegroundColor Green
             }
             else {
-                Set-NetFirewallRule -Group $groupName -Enabled False
+                Set-NetFirewallRule -Group $groupName -Enabled "False"
                 Write-Host "[INACTIVE] Rule set '$groupName' is now DISABLED." -ForegroundColor Gray
             }
         }
     }
     Write-FirewallLog -Message "Updated firewall rule states according to active profile ($activeProfile)" -Level "INFO"
+}
+
+function Register-FirewallProfileTask {
+    $taskName = "PF_AutoProfileSwitch"
+
+    try {
+        # Nasluch na EventID 10000 (Polaczono), 10001 (Rozlaczono) oraz 4004 (Zmiana kategorii sieci Public/Private/Domain)
+        $cimTriggerClass = Get-CimClass -ClassName MSFT_TaskEventTrigger -Namespace Root/Microsoft/Windows/TaskScheduler:MSFT_TaskEventTrigger
+        $trigger = New-CimInstance -CimClass $cimTriggerClass -ClientOnly
+        $trigger.Subscription = @"
+<QueryList>
+  <Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational">
+    <Select Path="Microsoft-Windows-NetworkProfile/Operational">*[System[(EventID=10000 or EventID=10001 or EventID=10002)]]</Select>
+  </Query>
+</QueryList>
+"@
+        $trigger.Enabled = $true
+
+        # Uruchomienie skryptu z flaga -AutoUpdateProfile (omija petle menu!)
+        $actionArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`" -AutoUpdateProfile"
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArgs
+
+        $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+
+        Register-ScheduledTask -TaskName $taskName -Trigger $trigger -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
+        Write-Host "[SUCCESS] Automat przelaczania profili ($taskName) zostal wlaczony w Harmonogramie Zadan." -ForegroundColor Green
+        Write-FirewallLog -Message "Registered Scheduled Task '$taskName' for automatic profile switching." -Level "INFO"
+    }
+    catch {
+        Write-Host "[ERROR] Nie udalo sie zarejestrowac zadania: $($_.Exception.Message)" -ForegroundColor Red
+        Write-FirewallLog -Message "Failed to register Scheduled Task '$taskName': $($_.Exception.Message)" -Level "ERROR"
+    }
+}
+
+function Unregister-FirewallProfileTask {
+    $taskName = "PF_AutoProfileSwitch"
+    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+        Write-Host "[CLEANUP] Automat przelaczania profili ($taskName) zostal wylaczony i usuniety." -ForegroundColor Yellow
+        Write-FirewallLog -Message "Unregistered Scheduled Task '$taskName'." -Level "INFO"
+    }
+    else {
+        Write-Warning "Zadanie '$taskName' nie jest obecnie zarejestrowane w systemie."
+    }
 }
 
 function Import-RulesFromCsv {
@@ -404,6 +466,14 @@ function Get-SuspiciousFirewallEvents {
 }
 
 # ==========================================
+# OBSLUGA AUTOMATYCZNEGO WYZWALACZA W TLE
+# ==========================================
+if ($AutoUpdateProfile) {
+    Update-FirewallRulesByProfile
+    exit
+}
+
+# ==========================================
 # 3. HELPERY MENU
 # ==========================================
 
@@ -448,7 +518,7 @@ do {
     Write-Host " 4. Dodaj regule blokujaca IP (Add-BlockedIP)"
     Write-Host " 5. Importuj reguly z pliku CSV (Import-RulesFromCsv)"
     Write-Host " 6. Usun regule lub wyczysc reguly PF_* (Remove-PFRules)"
-    Write-Host " 7. Przelacz reguly wg aktywnego profilu (Update-FirewallRulesByProfile)"
+    Write-Host " 7. Przelacz reguly wg profilu / Konfiguruj Automat (Event Trigger)"
     Write-Host " 8. Wyswietl utworzone reguly PF_*"
     Write-Host " -------------------------------------------" -ForegroundColor DarkGray
     Write-Host " 9. Zapisz nowa migawke wzorcowa (Save Baseline)" -ForegroundColor Yellow
@@ -540,15 +610,28 @@ do {
             Pause
         }
         "7" {
-            Write-Host "`n--- AKTUALIZACJA REGUL WG PROFILU ---" -ForegroundColor Yellow
-            Update-FirewallRulesByProfile
+            Write-Host "`n--- ZARZADZANIE PROFILEM I AUTOMATYZACJA ---" -ForegroundColor Yellow
+            Write-Host "1. Przelacz reguly teraz wg aktywnego profilu (Update-FirewallRulesByProfile)"
+            Write-Host "2. WLACZ automatyczne przelaczanie w tle (Harmonogram Zadan - Event Trigger)"
+            Write-Host "3. WYLACZ automatyczne przelaczanie w tle (Usun zadanie)"
+            $profChoice = Read-Host "Wybierz opcje (1-3)"
+
+            if ($profChoice -eq "1") {
+                Update-FirewallRulesByProfile
+            }
+            elseif ($profChoice -eq "2") {
+                Register-FirewallProfileTask
+            }
+            elseif ($profChoice -eq "3") {
+                Unregister-FirewallProfileTask
+            }
             Pause
         }
         "8" {
             Write-Host "`n--- LISTA REGUL FIREWALL (PF_*) ---" -ForegroundColor Yellow
             $rules = Get-NetFirewallRule -Name "PF_*" -ErrorAction SilentlyContinue
             if ($rules) {
-                $rules | Select-Object Name, DisplayName, Enabled, Direction, Action | Format-Table -AutoSize
+                $rules | Select-Object Name, DisplayName, Group, Enabled, Direction, Action | Format-Table -AutoSize
             } else {
                 Write-Host "Nie znaleziono zarejestrowanych regul z prefiksem PF_*." -ForegroundColor Gray
             }
