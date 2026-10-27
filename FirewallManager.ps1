@@ -1,8 +1,58 @@
 #Requires -RunAsAdministrator
+
+<#
+.SYNOPSIS
+    Zaawansowany menedzer Zapory Windows z obsluga profilowania sieci, kopii zapasowych, audytu integralnosci oraz automatyzacji zdarzeniowej.
+
+.DESCRIPTION
+    Skrypt PowerShell 'FirewallManager.ps1' zapewnia kompleksowe srodowisko do zarzadzania zapora sieciowa w systemie Windows.
+    
+    Glowne funkcjonalnosci obejmuja:
+    - Dodawanie i usuwanie dedykowanych regul blokujacych porty (TCP/UDP) oraz adresy IP/podsieci (oznaczonych prefiksem 'PF_*').
+    - Masowy import definicji regul z plikow CSV.
+    - Kontekstowe wlaczanie/wylaczanie grup regul w zaleznosci od aktywnego profilu polaczenia (Public, Private, Domain).
+    - Automatyzacje przelaczania profili w tle za pomoca Harmonogramu Zadan.
+    - Eksport i przywracanie pelnej polisy Zapory do/z plikow .wfw za pomoca netsh.
+    - Tworzenie migawki wzorcowej i weryfikacje integralnosci pod katem nieautoryzowanych zmian.
+    - Analize Dziennika Zdarzen Windows pod katem zmian regul wykonanych poza skryptem.
+    - Rejestracje wszystkich operacji w pliku 'firewall_audit.log'.
+
+.PARAMETER AutoUpdateProfile
+    Przelacznik uzywany przez wyzwalacz zdarzen w Harmonogramie Zadan Windows. Uruchamia wylacznie funkcje aktualizacji regul wedlug aktywnej sieci w tle i natychmiast konczy dzialanie skryptu bez wyswietlania menu interaktywnego.
+
+.PARAMETER ShowHelp
+    Wyswietla szczegolowa dokumentacje i pomoc dla skryptu, a nastepnie konczy jego dzialanie. Obsluguje aliasy: -h oraz -help.
+
+.EXAMPLE
+    .\FirewallManager.ps1
+    Uruchamia skrypt w interaktywnym trybie menu konsolowego (wymagane uprawnienia Administratora).
+
+.EXAMPLE
+    .\FirewallManager.ps1 -AutoUpdateProfile
+    Wykonuje cicha aktualizacje stanu regul na podstawie aktualnie polaczonej sieci i konczy dzialanie.
+
+.EXAMPLE
+    .\FirewallManager.ps1 -h
+    Wyswietla opis skryptu, dostepne parametry oraz przyklady uzycia.
+
+.NOTES
+    Wymagania: Windows PowerShell 5.1 / PowerShell 7+ uruchomiony z uprawnieniami Administratora.
+#>
+
 param (
     # Przelacznik uzywany przez Harmonogram Zadan Windows do aktualizacji w tle
-    [switch]$AutoUpdateProfile
+    [switch]$AutoUpdateProfile,
+
+    # Przelacznik wyswietlajacy pomoc (-h, --help, -help)
+    [Alias('h', 'help')]
+    [switch]$ShowHelp
 )
+
+# Jezeli uzytkownik wywolal skrypt z parametrem pomocy, wyswietl pomoc i zakoncz dzialanie
+if ($ShowHelp) {
+    Get-Help $PSCommandPath -Detailed
+    exit
+}
 
 # ==========================================
 # KONFIGURACJA LOGOWANIA I BASELINE
@@ -178,7 +228,7 @@ function Register-FirewallProfileTask {
 "@
         $trigger.Enabled = $true
 
-        # Uruchomienie skryptu z flaga -AutoUpdateProfile
+        # Uruchomienie skryptu z flaga -AutoUpdateProfile (omija petle menu!)
         $actionArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`" -AutoUpdateProfile"
         $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArgs
 
