@@ -66,12 +66,20 @@ function Write-FirewallLog {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Message,
+
         [ValidateSet("INFO", "WARN", "ERROR")]
         [string]$Level = "INFO"
     )
+    
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $logEntry = "[$timestamp] [$Level] [$user] - $Message"
+    
+    $rawUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $user = if ($rawUser -match '\\') { $rawUser.Split('\')[-1] } else { $rawUser }
+    if ([string]::IsNullOrWhiteSpace($user)) { $user = $env:USERNAME }
+
+    $paddedLevel = $Level.PadRight(5)
+
+    $logEntry = "$timestamp | $paddedLevel | $user | $Message"
     Add-Content -Path $LogPath -Value $logEntry -ErrorAction SilentlyContinue
 }
 
@@ -228,7 +236,7 @@ function Register-FirewallProfileTask {
 "@
         $trigger.Enabled = $true
 
-        # Uruchomienie skryptu z flaga -AutoUpdateProfile (omija petle menu!)
+        # Uruchomienie skryptu z flaga -AutoUpdateProfile
         $actionArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`" -AutoUpdateProfile"
         $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArgs
 
@@ -461,7 +469,7 @@ function Get-SuspiciousFirewallEvents {
         return
     }
 
-    $results = foreach ($evt in $events) {
+    $eventList = foreach ($evt in $events) {
         $xml = [xml]$evt.ToXml()
         $eventData = @{}
         foreach ($data in $xml.Event.EventData.Data) {
@@ -470,48 +478,85 @@ function Get-SuspiciousFirewallEvents {
 
         $ruleName = $eventData['RuleName']
         if (-not $ruleName) { $ruleName = $eventData['RuleId'] }
-        if (-not $ruleName) { $ruleName = "N/A" }
+        if ([string]::IsNullOrWhiteSpace($ruleName) -or $ruleName -eq "-") { continue }
+
+        $isBuiltInSystemRule = ($ruleName -like "@*" -or 
+                                $ruleName -like "{*" -or 
+                                $ruleName -like "*Defender*" -or 
+                                $ruleName -like "*WinDefend*" -or 
+                                $ruleName -like "*Microsoft Edge*" -or 
+                                $ruleName -like "*Microsoft Store*" -or
+                                $ruleName -like "*Font Driver Host*" -or 
+                                $ruleName -like "*mDNS*" -or 
+                                $ruleName -like "MSDTC*" -or 
+                                $ruleName -like "CDPSvc*" -or 
+                                $ruleName -like "WCN*" -or 
+                                $ruleName -like "CoreNet*" -or 
+                                $ruleName -match '^[0-9a-fA-F]{8}-' -or 
+                                $ruleName -match '^\d+$')
+
+        if ($isBuiltInSystemRule) { continue }
 
         $user = $eventData['SubjectUserName']
+        $domain = $eventData['SubjectDomainName']
         $userSid = $eventData['SubjectUserSid']
-        if (-not $user) { $user = $evt.UserId }
 
-        $isBuiltInSystemRule = ($ruleName -like "@FirewallAPI.dll*" -or 
-                                $ruleName -like "@%SystemRoot%*" -or 
-                                $ruleName -like "MSDTC*" -or 
-                                $ruleName -like "CDPSvc*")
-
-        $isSystemAccount = ($userSid -in @('S-1-5-18', 'S-1-5-19', 'S-1-5-20') -or 
-                            $user -like 'NT AUTHORITY*' -or 
-                            $user -like '*$')
-
-        $isScriptRule = ($ruleName -like "PF_*")
-
-        if (-not $isBuiltInSystemRule) {
-            $isSuspicious = (-not $isScriptRule) -and (-not $isSystemAccount)
-
-            [PSCustomObject]@{
-                TimeCreated = $evt.TimeCreated
-                EventID     = $evt.Id
-                User        = $user
-                RuleName    = $ruleName
-                Suspicious  = $isSuspicious
+        if ($user -and $domain -and $user -ne "-") {
+            $user = "$domain\$user"
+        } elseif (-not $user -or $user -eq "-") {
+            if ($evt.UserId) {
+                try {
+                    $user = ([System.Security.Principal.SecurityIdentifier]$evt.UserId).Translate([System.Security.Principal.NTAccount]).Value
+                } catch {
+                    $user = $evt.UserId.Value
+                }
             }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($user) -or $user -eq "-") {
+            $user = "SYSTEM / Automatyczne"
+        }
+
+        $isSystemAccount = ($userSid -in @('S-1-5-18', 'S-1-5-19', 'S-1-5-20') -and $user -eq "SYSTEM / Automatyczne")
+        if ($isSystemAccount) { continue }
+
+        $isScriptRule = ($ruleName -like "PF_*" -or $ruleName -like "PF [*]" -or $ruleName -like "PF[*]")
+        $source = if ($isScriptRule) { "Skrypt (PF)" } else { "GUI / Manualna" }
+
+        $action = switch ($evt.Id) {
+            4946 { "Dodano regule" }
+            2004 { "Dodano regule" }
+            4947 { "Zmodyfikowano regule" }
+            2005 { "Zmodyfikowano regule" }
+            4948 { "Usunieto regule" }
+            2006 { "Usunieto regule" }
+            2099 { "Zmiana stanu zapory" }
+            default { "Modyfikacja ($($evt.Id))" }
+        }
+
+        [PSCustomObject]@{
+            TimeCreated = $evt.TimeCreated
+            Action      = $action
+            Zrodlo      = $source
+            User        = $user
+            RuleName    = $ruleName
+            IsManual    = (-not $isScriptRule)
+            EventID     = $evt.Id
         }
     }
 
-    if ($results) {
-        Write-Host "`n=== DETEKCJA ZMIAN W DZIENNIKU WINDOWS ===" -ForegroundColor Yellow
-        $results | Format-Table TimeCreated, EventID, User, RuleName, Suspicious -AutoSize
+    if ($eventList) {
+        Write-Host "`n=== HISTORIA ZMIAN W ZAPORZE ===" -ForegroundColor Yellow
+        $eventList | Format-Table TimeCreated, Action, Zrodlo, User, RuleName -AutoSize
 
-        $suspiciousRules = $results | Where-Object { $_.Suspicious -eq $true }
-        if ($suspiciousRules) {
-            foreach ($sRule in $suspiciousRules) {
-                Write-FirewallLog -Message "UNAUTHORIZED USER CHANGE DETECTED: Rule '$($sRule.RuleName)' by user '$($sRule.User)'" -Level "WARN"
+        $manualChanges = $eventList | Where-Object { $_.IsManual -eq $true }
+        if ($manualChanges) {
+            foreach ($mRule in $manualChanges) {
+                Write-FirewallLog -Message "MANUAL/GUI CHANGE: $($mRule.Action) '$($mRule.RuleName)' (User: $($mRule.User))" -Level "WARN"
             }
         }
     } else {
-        Write-Host "Wszystkie zarejestrowane zdarzenia to automatyczne modyfikacje wbudowane Windows." -ForegroundColor Gray
+        Write-Host "`n[OK] Brak akcji skryptu ani zmian uzytkownika w tym okresie." -ForegroundColor Green
     }
 }
 
@@ -546,7 +591,7 @@ function Read-Choice {
 }
 
 # ==========================================
-# 4. INTERAKTYWNA PETLA MENU
+# 4. PETLA MENU
 # ==========================================
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -562,17 +607,17 @@ do {
     Write-Host "=============================================" -ForegroundColor Cyan
     Write-Host "    ZARZADZANIE ZAPORA FIREWALL POWERSHELL  " -ForegroundColor Cyan
     Write-Host "=============================================" -ForegroundColor Cyan
-    Write-Host " 1. Utworz kopie zapasowa konfiguracji (Backup)"
-    Write-Host " 2. Przywroc konfiguracje z pliku (Restore)"
-    Write-Host " 3. Dodaj regule blokujaca port (Add-BlockedPort)"
-    Write-Host " 4. Dodaj regule blokujaca IP (Add-BlockedIP)"
-    Write-Host " 5. Importuj reguly z pliku CSV (Import-RulesFromCsv)"
-    Write-Host " 6. Usun regule lub wyczysc reguly PF_* (Remove-PFRules)"
-    Write-Host " 7. Przelacz reguly wg profilu / Konfiguruj Automat (Event Trigger)"
+    Write-Host " 1. Utworz kopie zapasowa konfiguracji"
+    Write-Host " 2. Przywroc konfiguracje z pliku"
+    Write-Host " 3. Dodaj regule blokujaca port"
+    Write-Host " 4. Dodaj regule blokujaca IP"
+    Write-Host " 5. Importuj reguly z pliku CSV"
+    Write-Host " 6. Usun regule lub wyczysc reguly PF_*"
+    Write-Host " 7. Przelacz reguly wg profilu / Konfiguruj Automat"
     Write-Host " 8. Wyswietl utworzone reguly PF_*"
     Write-Host " -------------------------------------------" -ForegroundColor DarkGray
-    Write-Host " 9. Zapisz nowa migawke wzorcowa (Save Baseline)" -ForegroundColor Yellow
-    Write-Host " 10. Wykryj nieautoryzowane zmiany (Test Integrity)" -ForegroundColor Yellow
+    Write-Host " 9. Zapisz nowa migawke wzorcowa" -ForegroundColor Yellow
+    Write-Host " 10. Wykryj nieautoryzowane zmiany" -ForegroundColor Yellow
     Write-Host " 11. Analizuj Dziennik Zdarzen Windows" -ForegroundColor Yellow
     Write-Host " 0. Wyjscie"
     Write-Host "=============================================" -ForegroundColor Cyan
