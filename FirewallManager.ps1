@@ -87,10 +87,17 @@ function Write-FirewallLog {
 # 1. FUNKCJE ZARZADZANIA REGULAMI
 # ==========================================
 
-function Add-BlockedPort {
+function Add-BlockedRule {
+    <#
+    .SYNOPSIS
+        Tworzy regule blokujaca port, adres IP lub kombinacje obu parametrow.
+    #>
     param (
-        [Parameter(Mandatory = $true)]
-        [int]$Port,
+        [Parameter(Mandatory = $false)]
+        [int]$Port = 0,
+
+        [Parameter(Mandatory = $false)]
+        [string]$IPAddress = "",
 
         [ValidateSet("TCP", "UDP")]
         [string]$Protocol = "TCP",
@@ -102,83 +109,72 @@ function Add-BlockedPort {
         [string]$ProfileGroup = "Public"
     )
 
-    $groupName = "PowershellFirewall_$ProfileGroup"
-    $ruleName = "PF_${ProfileGroup}_BlockPort_${Protocol}_${Port}_${Direction}"
-    $displayName = "PF [$ProfileGroup] Blocking Port $Port ($Protocol - $Direction)"
+    $hasPort = ($Port -gt 0 -and $Port -le 65535)
+    $hasIP   = (-not [string]::IsNullOrWhiteSpace($IPAddress))
 
+    # 1. Walidacja: uzytkownik musi podac przynajmniej Port lub IP
+    if (-not $hasPort -and -not $hasIP) {
+        Write-Warning "You must specify at least a Port (-Port) or an IP Address (-IPAddress)!"
+        return
+    }
+
+    $groupName = "PowershellFirewall_$ProfileGroup"
+    $safeIPName = $IPAddress -replace '/', '_'
+
+    # 2. Dynamiczne generowanie nazwy reguly oraz opisu (3 scenariusze)
+    if ($hasPort -and $hasIP) {
+        $ruleName    = "PF_${ProfileGroup}_Block_${Protocol}_${Port}_IP_${safeIPName}_${Direction}"
+        $displayName = "PF [$ProfileGroup] Blocking Port $Port ($Protocol) & IP $IPAddress ($Direction)"
+        $targetDesc  = "Port $Port ($Protocol) and IP $IPAddress"
+    }
+    elseif ($hasPort) {
+        $ruleName    = "PF_${ProfileGroup}_BlockPort_${Protocol}_${Port}_${Direction}"
+        $displayName = "PF [$ProfileGroup] Blocking Port $Port ($Protocol - $Direction)"
+        $targetDesc  = "Port $Port ($Protocol)"
+    }
+    else {
+        $ruleName    = "PF_${ProfileGroup}_BlockIP_${safeIPName}_${Direction}"
+        $displayName = "PF [$ProfileGroup] Blocking IP $IPAddress ($Direction)"
+        $targetDesc  = "IP address $IPAddress"
+    }
+
+    # 3. Sprawdzenie, czy regula juz istnieje w systemie
     $existingRule = Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
     if ($null -ne $existingRule) {
         Write-Warning "Firewall Rule '$ruleName' already exists!"
         return
     }
 
+    # 4. Bazowe parametry reguly
     $ruleParams = @{
         Name        = $ruleName
         DisplayName = $displayName
         Group       = $groupName
         Direction   = $Direction
         Action      = "Block"
-        Protocol    = $Protocol
-        LocalPort   = $Port
         Profile     = "Any"
         Enabled     = "False"
         ErrorAction = "Stop"
     }
 
+    # Dolaczanie parametrow specyficznych dla Portu i/lub IP
+    if ($hasPort) {
+        $ruleParams["Protocol"]  = $Protocol
+        $ruleParams["LocalPort"] = $Port
+    }
+    if ($hasIP) {
+        $ruleParams["RemoteAddress"] = $IPAddress
+    }
+
+    # 5. Utworzenie reguly w zaporze i zapis do logow
     try {
         New-NetFirewallRule @ruleParams | Out-Null
-        Write-Host "[SUCCESS] Port $Port added to '$groupName' ($Protocol, direction: $Direction)." -ForegroundColor Green
-        Write-FirewallLog -Message "Added blocked port rule: $ruleName (Port $Port, $Protocol)" -Level "INFO"
+        Write-Host "[SUCCESS] Blocked $targetDesc in '$groupName' (direction: $Direction)." -ForegroundColor Green
+        Write-FirewallLog -Message "Added block rule: $ruleName ($targetDesc, $Direction)" -Level "INFO"
     }
     catch {
-        Write-Host "[ERROR] Failed to add port $Port to '$groupName': $($_.Exception.Message)" -ForegroundColor Red
-        Write-FirewallLog -Message "Failed to add blocked port rule $ruleName : $($_.Exception.Message)" -Level "ERROR"
-    }
-}
-
-function Add-BlockedIP {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$IPAddress,
-
-        [ValidateSet("Inbound", "Outbound")]
-        [string]$Direction = "Inbound",
-
-        [ValidateSet("Public", "Private", "Domain")]
-        [string]$ProfileGroup = "Public"
-    )
-
-    $groupName = "PowershellFirewall_$ProfileGroup"
-    $safeIPName = $IPAddress -replace '/', '_'
-    $ruleName = "PF_${ProfileGroup}_BlockIP_${safeIPName}_${Direction}"
-    $displayName = "PF [$ProfileGroup] Blocking IP $IPAddress ($Direction)"
-
-    $existingRule = Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
-    if ($null -ne $existingRule) {
-        Write-Warning "Firewall Rule '$ruleName' already exists!"
-        return
-    }
-
-    $ruleParams = @{
-        Name          = $ruleName
-        DisplayName   = $displayName
-        Group         = $groupName
-        Direction     = $Direction
-        Action        = "Block"
-        RemoteAddress = $IPAddress
-        Profile       = "Any"
-        Enabled       = "False"
-        ErrorAction   = "Stop"
-    }
-
-    try {
-        New-NetFirewallRule @ruleParams | Out-Null
-        Write-Host "[SUCCESS] IP address $IPAddress added to '$groupName' (direction: $Direction)." -ForegroundColor Green
-        Write-FirewallLog -Message "Added blocked IP rule: $ruleName (IP $IPAddress)" -Level "INFO"
-    }
-    catch {
-        Write-Host "[ERROR] Failed to add IP $IPAddress to '$groupName': $($_.Exception.Message)" -ForegroundColor Red
-        Write-FirewallLog -Message "Failed to add blocked IP rule $ruleName : $($_.Exception.Message)" -Level "ERROR"
+        Write-Host "[ERROR] Failed to add rule for $targetDesc to '$groupName': $($_.Exception.Message)" -ForegroundColor Red
+        Write-FirewallLog -Message "Failed to add block rule $ruleName : $($_.Exception.Message)" -Level "ERROR"
     }
 }
 
@@ -279,11 +275,19 @@ function Import-RulesFromCsv {
     $rulesList = Import-Csv -Path $CsvPath
 
     foreach ($item in $rulesList) {
-        if ($item.Type -eq "Port") {
-            Add-BlockedPort -Port ([int]$item.Target) -Protocol $item.Protocol -Direction $item.Direction -ProfileGroup $item.ProfileGroup
+        # Obsluga nowego formatu CSV (kolumny: Port, IPAddress, Protocol, Direction, ProfileGroup)
+        if ($item.PSObject.Properties.Name -contains "Port" -or $item.PSObject.Properties.Name -contains "IPAddress") {
+            $portVal = if ([string]::IsNullOrWhiteSpace($item.Port)) { 0 } else { [int]$item.Port }
+            $protVal = if ([string]::IsNullOrWhiteSpace($item.Protocol) -or $item.Protocol -eq "Any") { "TCP" } else { $item.Protocol }
+            
+            Add-BlockedRule -Port $portVal -IPAddress $item.IPAddress -Protocol $protVal -Direction $item.Direction -ProfileGroup $item.ProfileGroup
+        }
+        # Kompatybilnosc wsteczna ze starym formatem CSV (kolumny: Type, Target...)
+        elseif ($item.Type -eq "Port") {
+            Add-BlockedRule -Port ([int]$item.Target) -Protocol $item.Protocol -Direction $item.Direction -ProfileGroup $item.ProfileGroup
         }
         elseif ($item.Type -eq "IP") {
-            Add-BlockedIP -IPAddress $item.Target -Direction $item.Direction -ProfileGroup $item.ProfileGroup
+            Add-BlockedRule -IPAddress $item.Target -Direction $item.Direction -ProfileGroup $item.ProfileGroup
         }
     }
 
@@ -609,16 +613,15 @@ do {
     Write-Host "=============================================" -ForegroundColor Cyan
     Write-Host " 1. Utworz kopie zapasowa konfiguracji"
     Write-Host " 2. Przywroc konfiguracje z pliku"
-    Write-Host " 3. Dodaj regule blokujaca port"
-    Write-Host " 4. Dodaj regule blokujaca IP"
-    Write-Host " 5. Importuj reguly z pliku CSV"
-    Write-Host " 6. Usun regule lub wyczysc reguly PF_*"
-    Write-Host " 7. Przelacz reguly wg profilu / Konfiguruj Automat"
-    Write-Host " 8. Wyswietl utworzone reguly PF_*"
+    Write-Host " 3. Dodaj regule blokujaca port/IP/port + IP"
+    Write-Host " 4. Importuj reguly z pliku CSV"
+    Write-Host " 5. Usun regule lub wyczysc reguly PF_*"
+    Write-Host " 6. Przelacz reguly wg profilu / Konfiguruj Automat"
+    Write-Host " 7. Wyswietl utworzone reguly PF_*"
     Write-Host " -------------------------------------------" -ForegroundColor DarkGray
-    Write-Host " 9. Zapisz nowa migawke wzorcowa" -ForegroundColor Yellow
-    Write-Host " 10. Wykryj nieautoryzowane zmiany" -ForegroundColor Yellow
-    Write-Host " 11. Analizuj Dziennik Zdarzen Windows" -ForegroundColor Yellow
+    Write-Host " 8. Zapisz nowa migawke wzorcowa" -ForegroundColor Yellow
+    Write-Host " 9. Wykryj nieautoryzowane zmiany" -ForegroundColor Yellow
+    Write-Host " 10. Analizuj Dziennik Zdarzen Windows" -ForegroundColor Yellow
     Write-Host " 0. Wyjscie"
     Write-Host "=============================================" -ForegroundColor Cyan
     
@@ -646,33 +649,27 @@ do {
             Pause
         }
         "3" {
-            Write-Host "`n--- DODAWANIE REGULY BLOKOWANIA PORTU ---" -ForegroundColor Yellow
-            [int]$port = Read-Host "Podaj numer portu (np. 80, 443)"
-            if ($port -gt 0) {
-                $protocol = Read-Choice -Prompt "Protokol" -ValidOptions @("TCP", "UDP") -DefaultOption "TCP"
+            Write-Host "`n--- DODAWANIE REGULY BLOKUJACEJ (PORT / IP / OBA) ---" -ForegroundColor Yellow
+            $portInput = Read-Host "Podaj numer portu (np. 80, 443) [Wcisnij Enter, aby pominac]"
+            $ipInput   = Read-Host "Podaj adres IP lub podsiec (np. 10.0.0.0/24) [Wcisnij Enter, aby pominac]"
+
+            $portVal = if ([string]::IsNullOrWhiteSpace($portInput)) { 0 } else { [int]$portInput }
+            
+            if ($portVal -gt 0 -or (-not [string]::IsNullOrWhiteSpace($ipInput))) {
+                $protocol = "TCP"
+                if ($portVal -gt 0) {
+                    $protocol = Read-Choice -Prompt "Protokol" -ValidOptions @("TCP", "UDP") -DefaultOption "TCP"
+                }
                 $direction = Read-Choice -Prompt "Kierunek" -ValidOptions @("Inbound", "Outbound") -DefaultOption "Inbound"
-                $profile = Read-Choice -Prompt "Profil" -ValidOptions @("Public", "Private", "Domain") -DefaultOption "Public"
-                
-                Add-BlockedPort -Port $port -Protocol $protocol -Direction $direction -ProfileGroup $profile
+                $profile   = Read-Choice -Prompt "Profil" -ValidOptions @("Public", "Private", "Domain") -DefaultOption "Public"
+
+                Add-BlockedRule -Port $portVal -IPAddress $ipInput -Protocol $protocol -Direction $direction -ProfileGroup $profile
             } else {
-                Write-Host "[ERROR] Niepoprawny numer portu." -ForegroundColor Red
+                Write-Host "[ERROR] Musisz podac przynajmniej numer portu lub adres IP." -ForegroundColor Red
             }
             Pause
         }
         "4" {
-            Write-Host "`n--- DODAWANIE REGULY BLOKOWANIA ADRESU IP ---" -ForegroundColor Yellow
-            $ip = Read-Host "Podaj adres IP lub podsiec (np. 192.168.1.50 lub 10.0.0.0/24)"
-            if (-not [string]::IsNullOrWhiteSpace($ip)) {
-                $direction = Read-Choice -Prompt "Kierunek" -ValidOptions @("Inbound", "Outbound") -DefaultOption "Inbound"
-                $profile = Read-Choice -Prompt "Profil" -ValidOptions @("Public", "Private", "Domain") -DefaultOption "Public"
-                
-                Add-BlockedIP -IPAddress $ip -Direction $direction -ProfileGroup $profile
-            } else {
-                Write-Host "[ERROR] Adres IP nie moze byc pusty." -ForegroundColor Red
-            }
-            Pause
-        }
-        "5" {
             Write-Host "`n--- IMPORT REGUL Z PLIKU CSV ---" -ForegroundColor Yellow
             $csv = Read-Host "Podaj sciezke do pliku CSV"
             if (-not [string]::IsNullOrWhiteSpace($csv)) {
@@ -682,7 +679,7 @@ do {
             }
             Pause
         }
-        "6" {
+        "5" {
             Write-Host "`n--- USUWANIE REGUL ZAPORY ---" -ForegroundColor Yellow
             Write-Host "1. Usun pojedyncza regule po nazwie"
             Write-Host "2. Wyczysc WSZYSTKIE reguly z prefiksem PF_*"
@@ -704,7 +701,7 @@ do {
             }
             Pause
         }
-        "7" {
+        "6" {
             Write-Host "`n--- ZARZADZANIE PROFILEM I AUTOMATYZACJA ---" -ForegroundColor Yellow
             Write-Host "1. Przelacz reguly teraz wg aktywnego profilu (Update-FirewallRulesByProfile)"
             Write-Host "2. WLACZ automatyczne przelaczanie w tle (Harmonogram Zadan - Event Trigger)"
@@ -722,7 +719,7 @@ do {
             }
             Pause
         }
-        "8" {
+        "7" {
             Write-Host "`n--- LISTA REGUL FIREWALL (PF_*) ---" -ForegroundColor Yellow
             $rules = Get-NetFirewallRule -Name "PF_*" -ErrorAction SilentlyContinue
             if ($rules) {
@@ -732,17 +729,17 @@ do {
             }
             Pause
         }
-        "9" {
+        "8" {
             Write-Host "`n--- TWORZENIE MIGAWKI WZORCOWEJ (BASELINE) ---" -ForegroundColor Yellow
             Save-FirewallBaseline
             Pause
         }
-        "10" {
+        "9" {
             Write-Host "`n--- SPRAWDZANIE INTEGRALNOSCI REGUL ---" -ForegroundColor Yellow
             Test-FirewallIntegrity
             Pause
         }
-        "11" {
+        "10" {
             Write-Host "`n--- ANALIZA DZIENNIKA ZDARZEN WINDOWS ---" -ForegroundColor Yellow
             $hours = Read-Host "Z ilu ostatnich godzin wyswietlic zdarzenia? [Domyslnie: 24]"
             if ([string]::IsNullOrWhiteSpace($hours)) { $hours = 24 }
