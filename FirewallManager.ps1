@@ -97,6 +97,7 @@ function Add-BlockedRule {
         [int]$Port = 0,
 
         [Parameter(Mandatory = $false)]
+        [ValidatePattern('^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(/\d{1,2})?)?$')]
         [string]$IPAddress = "",
 
         [ValidateSet("TCP", "UDP")]
