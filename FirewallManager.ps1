@@ -61,6 +61,7 @@ $ScriptPath = If ($PSCommandPath) { $PSCommandPath } Else { Join-Path (Get-Locat
 $ScriptDir = Split-Path -Path $ScriptPath -Parent
 $LogPath = Join-Path $ScriptDir "firewall_audit.log"
 $BaselinePath = Join-Path $ScriptDir "firewall_baseline.json"
+$BackupDir = Join-Path $ScriptDir "FWbackup"
 
 function Write-FirewallLog {
     param(
@@ -331,16 +332,12 @@ function Invoke-FirewallBackup {
     param(
         [Parameter(ParameterSetName = 'Backup', Position = 0)]
         [ValidateNotNullOrEmpty()]
-        [string]$Output = (Get-Location).Path,
+        [string]$Output = $BackupDir,
 
         [Parameter(ParameterSetName = 'Restore', Mandatory)]
         [ValidateScript({ Test-Path $_ -PathType Leaf })]
         [string]$Restore
     )
-
-    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator)
-    if (-not $isAdmin) { Write-Error "Run this as Administrator."; return }
 
     if ($PSCmdlet.ParameterSetName -eq 'Restore') {
         $file = (Resolve-Path $Restore).Path
@@ -631,7 +628,7 @@ do {
     switch ($choice) {
         "1" {
             Write-Host "`n--- TWORZENIE KOPII ZAPASOWEJ ---" -ForegroundColor Yellow
-            $outPath = Read-Host "Podaj sciezke zapisu [Domyslnie: biezacy katalog]"
+            $outPath = Read-Host "Podaj sciezke zapisu [Domyslnie: $BackupDir]"
             if ([string]::IsNullOrWhiteSpace($outPath)) {
                 Invoke-FirewallBackup
             } else {
