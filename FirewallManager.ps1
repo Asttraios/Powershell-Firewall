@@ -591,6 +591,13 @@ function Get-SuspiciousFirewallEvents {
                                 $ruleName -like "*WinDefend*" -or 
                                 $ruleName -like "*Microsoft Edge*" -or 
                                 $ruleName -like "*Microsoft Store*" -or
+                                $ruleName -like "*Microsoft Teams*" -or
+                                $ruleName -like "*Windows Web Experience Pack*" -or
+                                $ruleName -like "*Microsoft 365*" -or
+                                $ruleName -like "*Games*" -or
+                                $ruleName -like "*Xbox*" -or
+                                $ruleName -like "*Widgets*" -or
+                                $ruleName -like "*ProductPkgDisplayName*" -or
                                 $ruleName -like "*Font Driver Host*" -or 
                                 $ruleName -like "*mDNS*" -or 
                                 $ruleName -like "MSDTC*" -or 
@@ -599,6 +606,7 @@ function Get-SuspiciousFirewallEvents {
                                 $ruleName -like "CoreNet*" -or 
                                 $ruleName -match '^[0-9a-fA-F]{8}-' -or 
                                 $ruleName -match '^\d+$')
+
 
         if ($isBuiltInSystemRule) { continue }
 
