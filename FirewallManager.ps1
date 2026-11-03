@@ -488,6 +488,13 @@ function Get-SuspiciousFirewallEvents {
                                 $ruleName -like "*WinDefend*" -or 
                                 $ruleName -like "*Microsoft Edge*" -or 
                                 $ruleName -like "*Microsoft Store*" -or
+                                $ruleName -like "*Microsoft Teams*" -or
+                                $ruleName -like "*Windows Web Experience Pack*" -or
+                                $ruleName -like "*Microsoft 365*" -or
+                                $ruleName -like "*Games*" -or
+                                $ruleName -like "*Xbox*" -or
+                                $ruleName -like "*Widgets*" -or
+                                $ruleName -like "*ProductPkgDisplayName*" -or
                                 $ruleName -like "*Font Driver Host*" -or 
                                 $ruleName -like "*mDNS*" -or 
                                 $ruleName -like "MSDTC*" -or 
@@ -623,7 +630,7 @@ do {
     Write-Host " 0. Wyjscie"
     Write-Host "=============================================" -ForegroundColor Cyan
     
-    $choice = Read-Host "Wybierz opcje (0-11)"
+    $choice = Read-Host "Wybierz opcje (0-10)"
 
     switch ($choice) {
         "1" {
