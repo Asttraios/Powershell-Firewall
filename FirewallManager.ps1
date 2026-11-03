@@ -2,43 +2,143 @@
 
 <#
 .SYNOPSIS
-    Zaawansowany menedzer Zapory Windows z obsluga profilowania sieci, kopii zapasowych, audytu integralnosci oraz automatyzacji zdarzeniowej.
+    Zaawansowany menedzer Zapory Windows (Windows Defender Firewall) z obsluga profilowania sieci,
+    kopii zapasowych, audytu integralnosci (Baseline JSON + Event Log) oraz automatyzacji zdarzeniowej.
 
 .DESCRIPTION
-    Skrypt PowerShell 'FirewallManager.ps1' zapewnia kompleksowe srodowisko do zarzadzania zapora sieciowa w systemie Windows.
-    
-    Glowne funkcjonalnosci obejmuja:
-    - Dodawanie i usuwanie dedykowanych regul blokujacych porty (TCP/UDP) oraz adresy IP/podsieci (oznaczonych prefiksem 'PF_*').
-    - Masowy import definicji regul z plikow CSV.
-    - Kontekstowe wlaczanie/wylaczanie grup regul w zaleznosci od aktywnego profilu polaczenia (Public, Private, Domain).
-    - Automatyzacje przelaczania profili w tle za pomoca Harmonogramu Zadan.
-    - Eksport i przywracanie pelnej polisy Zapory do/z plikow .wfw za pomoca netsh.
-    - Tworzenie migawki wzorcowej i weryfikacje integralnosci pod katem nieautoryzowanych zmian.
-    - Analize Dziennika Zdarzen Windows pod katem zmian regul wykonanych poza skryptem.
-    - Rejestracje wszystkich operacji w pliku 'firewall_audit.log'.
+    Skrypt PowerShell 'FirewallManager.ps1' zapewnia kompleksowe srodowisko do zarzadzania
+    polityka zapory sieciowej w systemie Windows 10/11 oraz Windows Server.
+    Moze dzialac w trzech trybach:
+      1. Interaktywne menu konsolowe (domyslnie po uruchomieniu bez flag).
+      2. Cichy tryb automatyczny w tle (wyzwalany przez Harmonogram Zadan z flaga -AutoUpdateProfile).
+      3. Biblioteka funkcji (po zaladowaniu skryptu w konsoli za pomoca dot-sourcingu: . .\FirewallManager.ps1).
+
+    ===========================================================================
+    DOSTEPNE FUNKCJE WEWNETRZNE I ICH PARAMETRY (FLAGI)
+    ===========================================================================
+
+    1. Zarzadzanie regulami i profilami sieci:
+       * Add-BlockedRule
+           Tworzy regule blokujaca port, adres IP/podsiec lub kombinacje obu naraz (z prefiksem 'PF_*').
+           Parametry:
+             -Port <int>           : Numer portu TCP/UDP z zakresu 1-65535 (opcjonalny, gdy podano -IPAddress).
+             -IPAddress <string>   : Adres IPv4 lub podsiec CIDR, np. '10.0.0.0/24' (walidacja Regex).
+             -Protocol <string>    : Protokol komunikacji: 'TCP' (domyslnie) lub 'UDP'.
+             -Direction <string>   : Kierunek ruchu: 'Inbound' (domyslnie) lub 'Outbound'.
+             -ProfileGroup <string>: Docelowy zestaw profilowy: 'Public' (domyslnie), 'Private' lub 'Domain'.
+
+       * Import-RulesFromCsv
+           Masowo importuje i tworzy reguly z pliku CSV, a nastepnie synchronizuje aktywny profil sieci.
+           Parametry:
+             -CsvPath <string>     : Sciezka do pliku CSV (wymagany). Obsluguje nowy format kolumn
+                                     (Port, IPAddress, Protocol, Direction, ProfileGroup) oraz starszy
+                                     format kompatybilnosci wstecznej (Type, Target, Protocol, Direction, ProfileGroup).
+
+       * Remove-PFRules
+           Usuwa wybrana regule po nazwie systemowej lub czysci wszystkie reguly utworzone przez skrypt.
+           Parametry:
+             -RuleName <string>    : Dokladna nazwa systemowa reguly do usuniecia (np. 'PF_Public_BlockPort_...').
+             -All                  : Przelacznik [switch] usuwajacy wszystkie reguly o prefiksie 'PF_*'.
+
+       * Update-FirewallRulesByProfile
+           Odczytuje aktywne karty sieciowe, wybiera najbardziej restrykcyjny profil wedlug priorytetu
+           (Public > Private > Domain) i masowo wlacza odpowiednia grupe regul ('PowershellFirewall_<Profil>'),
+           jednoczesnie wylaczajac pozostale zestawy.
+
+    2. Automatyzacja w tle (Event-Driven Architecture):
+       * Register-FirewallProfileTask
+           Rejestruje w Harmonogramie Zadan Windows zadanie 'PF_AutoProfileSwitch' dzialajace na koncie
+           'NT AUTHORITY\SYSTEM', wyzwalane zdarzeniami NLA (Event ID: 10000, 10001, 10002).
+       * Unregister-FirewallProfileTask
+           Wylacza i usuwa zadanie 'PF_AutoProfileSwitch' z Harmonogramu Zadan Windows.
+
+    3. Kopie zapasowe (Backup & Restore):
+       * Invoke-FirewallBackup
+           Eksportuje lub importuje pelna polityke zapory Windows do/z pliku binarnego '.wfw'.
+           Wspiera parametry bezpieczenstwa PowerShell: -WhatIf oraz -Confirm (SupportsShouldProcess).
+           Parametry:
+             -Output <string>      : Katalog docelowy dla nowej kopii zapasowej (domyslnie biezacy folder).
+             -Restore <string>     : Pelna sciezka do istniejacego pliku '.wfw' w celu przywrocenia polityki.
+
+    4. Audyt bezpieczenstwa, integralnosc i logowanie:
+       * Save-FirewallBaseline
+           Zapisuje migawke wzorcowa wszystkich aktualnych regul zapory do pliku JSON.
+           Parametry:
+             -Path <string>        : Sciezka zapisu pliku JSON (domyslnie '.\firewall_baseline.json').
+       * Test-FirewallIntegrity
+           Porownuje biezacy stan zapory z zapisana migawka JSON i wykrywa reguly dodane, usuniete
+           oraz zmodyfikowane (zmiana stanu Enabled lub akcji Allow/Block).
+           Parametry:
+             -Path <string>        : Sciezka do pliku wzorcowego JSON (domyslnie '.\firewall_baseline.json').
+       * Get-SuspiciousFirewallEvents
+           Analizuje Dziennik Zdarzen Windows z pominieciem szumu systemowego/UWP i wykrywa reczne
+           modyfikacje zapory wykonane poza skryptem (np. przez przystawke GUI mmc.exe).
+           Parametry:
+             -Hours <int>          : Zakres czasowy analizy wstecz w godzinach (domyslnie 24).
+       * Write-FirewallLog
+           Zapisuje sformatowane zdarzenia audytowe do pliku 'firewall_audit.log'.
+           Parametry:
+             -Message <string>     : Tresc komunikatu logu (wymagany).
+             -Level <string>       : Poziom waznosci: 'INFO' (domyslnie), 'WARN' lub 'ERROR'.
+
+    ===========================================================================
+    WYKORZYSTANE MODULY I CMDLETY SYSTEMOWE
+    ===========================================================================
+    * Modul NetSecurity      : New-NetFirewallRule, Get-NetFirewallRule, Set-NetFirewallRule, Remove-NetFirewallRule
+    * Modul NetConnection    : Get-NetConnectionProfile (detekcja kategorii sieci NLA)
+    * Modul ScheduledTasks   : Register-ScheduledTask, Unregister-ScheduledTask, Get-ScheduledTask,
+                               New-ScheduledTaskAction, New-ScheduledTaskPrincipal
+    * Modul CimCmdlets       : Get-CimClass, New-CimInstance (klasa WMI/CIM: MSFT_TaskEventTrigger z filtrem XPath)
+    * Diagnostyka i Zdarzenia: Get-WinEvent (dzienniki 'Security' oraz 'Windows Firewall With Advanced Security/Firewall',
+                               Event ID: 2004, 2005, 2006, 2099, 4946, 4947, 4948; dziennik 'NetworkProfile/Operational',
+                               Event ID: 10000, 10001, 10002)
+    * Narzedzia i dane       : netsh advfirewall (export/import), Import-Csv, ConvertTo-Json, ConvertFrom-Json
 
 .PARAMETER AutoUpdateProfile
-    Przelacznik uzywany przez wyzwalacz zdarzen w Harmonogramie Zadan Windows. Uruchamia wylacznie funkcje aktualizacji regul wedlug aktywnej sieci w tle i natychmiast konczy dzialanie skryptu bez wyswietlania menu interaktywnego.
+    Przelacznik [switch] uzywany przez wyzwalacz zdarzen w Harmonogramie Zadan Windows.
+    Uruchamia wylacznie funkcje Update-FirewallRulesByProfile w tle i natychmiast konczy dzialanie
+    skryptu (exit) bez wyswietlania menu interaktywnego.
 
 .PARAMETER ShowHelp
-    Wyswietla szczegolowa dokumentacje i pomoc dla skryptu, a nastepnie konczy jego dzialanie. Obsluguje aliasy: -h oraz -help.
+    Przelacznik [switch] wyswietlajacy niniejsza szczegolowa dokumentacje za pomoca Get-Help,
+    a nastepnie konczacy dzialanie skryptu. Obslugiwane aliasy: -h oraz -help.
 
 .EXAMPLE
     .\FirewallManager.ps1
-    Uruchamia skrypt w interaktywnym trybie menu konsolowego (wymagane uprawnienia Administratora).
-
-.EXAMPLE
-    .\FirewallManager.ps1 -AutoUpdateProfile
-    Wykonuje cicha aktualizacje stanu regul na podstawie aktualnie polaczonej sieci i konczy dzialanie.
+    Uruchamia skrypt w interaktywnym trybie menu konsolowego (opcje 0-10).
 
 .EXAMPLE
     .\FirewallManager.ps1 -h
-    Wyswietla opis skryptu, dostepne parametry oraz przyklady uzycia.
+    Wyswietla pelna dokumentacje techniczna skryptu, opis funkcji oraz przyklady uzycia.
+
+.EXAMPLE
+    .\FirewallManager.ps1 -AutoUpdateProfile
+    Wykonuje cicha aktualizacje grup regul na podstawie aktualnie polaczonej sieci i zamyka proces.
+
+.EXAMPLE
+    Add-BlockedRule -Port 3389 -IPAddress "192.168.1.50" -Protocol TCP -Direction Inbound -ProfileGroup Public
+    Tworzy regule laczona blokujaca port RDP (3389/TCP) wylacznie dla adresu IP 192.168.1.50 w profilu Public.
+
+.EXAMPLE
+    Import-RulesFromCsv -CsvPath ".\rules_config.csv"
+    Masowo importuje zestaw regul z pliku CSV i automatycznie aktywuje grupe odpowiadajaca biezacej sieci.
+
+.EXAMPLE
+    Invoke-FirewallBackup -Restore ".\fw_backup_20260512_143000.wfw" -WhatIf
+    Symuluje przywrocenie polityki zapory z pliku kopii zapasowej (.wfw) bez wprowadzania rzeczywistych zmian.
+
+.EXAMPLE
+    Get-SuspiciousFirewallEvents -Hours 48
+    Przeszukuje Dziennik Zdarzen Windows z ostatnich 48 godzin w poszukiwaniu recznych zmian w zaporze.
 
 .NOTES
-    Wymagania: Windows PowerShell 5.1 / PowerShell 7+ uruchomiony z uprawnieniami Administratora.
+    Wymagania   : Windows PowerShell 5.1 lub PowerShell 7+, uprawnienia Administratora (#Requires -RunAsAdministrator).
+    Pliki danych:
+      - firewall_audit.log    : Dziennik operacji skryptu i wykrytych naruszen.
+      - firewall_baseline.json: Migawka wzorcowa regul do weryfikacji integralnosci.
+      - fw_backup_*.wfw       : Binarne kopie zapasowe polityki zapory.
+    Autorzy     : Grupa 4 (Marcin Olszyna, Krzysztof Swiderski, Michal Skalecki) - Politechnika Wroclawska.
 #>
-
 param (
     # Przelacznik uzywany przez Harmonogram Zadan Windows do aktualizacji w tle
     [switch]$AutoUpdateProfile,
@@ -61,7 +161,6 @@ $ScriptPath = If ($PSCommandPath) { $PSCommandPath } Else { Join-Path (Get-Locat
 $ScriptDir = Split-Path -Path $ScriptPath -Parent
 $LogPath = Join-Path $ScriptDir "firewall_audit.log"
 $BaselinePath = Join-Path $ScriptDir "firewall_baseline.json"
-$BackupDir = Join-Path $ScriptDir "FWbackup"
 
 function Write-FirewallLog {
     param(
@@ -222,7 +321,7 @@ function Register-FirewallProfileTask {
     $taskName = "PF_AutoProfileSwitch"
 
     try {
-        # Nasluch na EventID 10000 (Polaczono), 10001 (Rozlaczono) oraz 4004 (Zmiana kategorii sieci Public/Private/Domain)
+        # Nasluch na EventID 10000 (Polaczono), 10001 (Rozlaczono) oraz 10002 (Zmiana kategorii sieci Public/Private/Domain)
         $cimTriggerClass = Get-CimClass -ClassName MSFT_TaskEventTrigger -Namespace Root/Microsoft/Windows/TaskScheduler:MSFT_TaskEventTrigger
         $trigger = New-CimInstance -CimClass $cimTriggerClass -ClientOnly
         $trigger.Subscription = @"
@@ -332,12 +431,16 @@ function Invoke-FirewallBackup {
     param(
         [Parameter(ParameterSetName = 'Backup', Position = 0)]
         [ValidateNotNullOrEmpty()]
-        [string]$Output = $BackupDir,
+        [string]$Output = (Get-Location).Path,
 
         [Parameter(ParameterSetName = 'Restore', Mandatory)]
         [ValidateScript({ Test-Path $_ -PathType Leaf })]
         [string]$Restore
     )
+
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) { Write-Error "Run this as Administrator."; return }
 
     if ($PSCmdlet.ParameterSetName -eq 'Restore') {
         $file = (Resolve-Path $Restore).Path
@@ -488,13 +591,6 @@ function Get-SuspiciousFirewallEvents {
                                 $ruleName -like "*WinDefend*" -or 
                                 $ruleName -like "*Microsoft Edge*" -or 
                                 $ruleName -like "*Microsoft Store*" -or
-                                $ruleName -like "*Microsoft Teams*" -or
-                                $ruleName -like "*Windows Web Experience Pack*" -or
-                                $ruleName -like "*Microsoft 365*" -or
-                                $ruleName -like "*Games*" -or
-                                $ruleName -like "*Xbox*" -or
-                                $ruleName -like "*Widgets*" -or
-                                $ruleName -like "*ProductPkgDisplayName*" -or
                                 $ruleName -like "*Font Driver Host*" -or 
                                 $ruleName -like "*mDNS*" -or 
                                 $ruleName -like "MSDTC*" -or 
@@ -635,7 +731,7 @@ do {
     switch ($choice) {
         "1" {
             Write-Host "`n--- TWORZENIE KOPII ZAPASOWEJ ---" -ForegroundColor Yellow
-            $outPath = Read-Host "Podaj sciezke zapisu [Domyslnie: $BackupDir]"
+            $outPath = Read-Host "Podaj sciezke zapisu [Domyslnie: biezacy katalog]"
             if ([string]::IsNullOrWhiteSpace($outPath)) {
                 Invoke-FirewallBackup
             } else {
